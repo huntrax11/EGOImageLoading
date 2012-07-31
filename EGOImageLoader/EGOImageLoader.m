@@ -29,6 +29,7 @@
 #import "EGOCache.h"
 
 static EGOImageLoader* __imageLoader;
+static NSLock* __runloopLock;
 
 inline static NSString* keyForURL(NSURL* url, NSString* style) {
 	if(style) {
@@ -55,6 +56,7 @@ inline static NSString* keyForURL(NSURL* url, NSString* style) {
 #if __EGOIL_USE_BLOCKS
 - (void)handleCompletionsForConnection:(EGOImageLoadConnection*)connection image:(UIImage*)image error:(NSError*)error;
 #endif
++ (NSLock*)_runloopLock;
 @end
 
 @implementation EGOImageLoader
@@ -68,6 +70,16 @@ inline static NSString* keyForURL(NSURL* url, NSString* style) {
 	}
 	
 	return __imageLoader;
+}
+
++ (NSLock*)_runloopLock {
+	@synchronized(self) {
+		if(!__runloopLock) {
+			__runloopLock = [[NSLock alloc] init];
+		}
+	}
+
+	return __runloopLock;
 }
 
 - (id)init {
@@ -114,6 +126,29 @@ inline static NSString* keyForURL(NSURL* url, NSString* style) {
 	return [self loadingConnectionForURL:aURL] ? YES : NO;
 }
 
+- (void)startInBackground:(EGOImageLoadConnection*)connection{
+	NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+	static NSRunLoop* _runloop = nil;
+	[[[self class] _runloopLock] lock];
+	BOOL runloopPresent = !!_runloop;
+	if(!runloopPresent) {
+		_runloop = [NSRunLoop currentRunLoop];
+	}
+	[[[self class] _runloopLock] unlock];
+	NSTimer* timer = [NSTimer timerWithTimeInterval:0.01 target:connection
+								selector:@selector(start) userInfo:nil repeats:NO];
+	[_runloop addTimer:timer forMode:NSDefaultRunLoopMode];
+	if(!runloopPresent) {
+		while(currentConnections.count) {
+			[_runloop runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
+		}
+		[[[self class] _runloopLock] lock];
+		_runloop = nil;
+		[[[self class] _runloopLock] unlock];
+	}
+	[pool release];
+}
+
 - (void)cancelLoadForURL:(NSURL*)aURL {
 	EGOImageLoadConnection* connection = [self loadingConnectionForURL:aURL];
 	[NSObject cancelPreviousPerformRequestsWithTarget:connection selector:@selector(start) object:nil];
@@ -133,7 +168,7 @@ inline static NSString* keyForURL(NSURL* url, NSString* style) {
 		[currentConnections setObject:connection forKey:aURL];
 		self.currentConnections = [[currentConnections copy] autorelease];
 		[connectionsLock unlock];
-		[connection performSelector:@selector(start) withObject:nil afterDelay:0.01];
+		[self performSelectorInBackground:@selector(startInBackground:) withObject:connection];
 		[connection release];
 		
 		return connection;
